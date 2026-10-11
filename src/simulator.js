@@ -16,7 +16,7 @@ export const baselineHarness = {
 // these, but cannot add new tools or change what they do.
 export const toolCatalog = {
   query_fleet_memory: "Load road closures other vehicles reported for this area into the task map.",
-  inspect_local: "Look at the road directly ahead and record what is observed.",
+  inspect_local: "Look closely at the obstacle (closure or temporary vehicle) and scan nearby roads within the perception radius.",
   update_local_map: "Mark the closure this vehicle just observed as blocked in its task map.",
   report_road_event: "Publish the closure this vehicle observed to fleet memory (MongoDB Atlas) for later vehicles.",
   replan: "Compute a new shortest route from the current position using the task map.",
@@ -26,15 +26,38 @@ export const toolCatalog = {
 
 const preflightTools = new Set(["query_fleet_memory"]);
 
+// Conditional rules: "when <condition>, do <action> and end this recovery cycle".
+// They are checked after every recovery tool call.
+export const ruleCatalog = {
+  conditions: {
+    temporary_obstacle: "inspect_local found that the obstacle is a temporary vehicle, not a closure",
+    repeated_block: "the vehicle has hit the same blocked road at least twice"
+  },
+  actions: {
+    wait_and_retry: "wait for the obstacle to clear, then continue the current route",
+    request_help: "stop and request human assistance"
+  }
+};
+
+// Context policy: what the vehicle perceives. A wider radius sees more closures per inspection
+// but costs one extra sensor sweep (tool call) per hop.
+export const contextOptions = { perceptionRadius: [0, 1, 2] };
+
 // Fixed guardrails. These are not part of the harness and cannot be evolved.
 export const guardrails = Object.freeze({
   maxToolCallsPerRun: 24,
   maxRecoveryCycles: 5,
-  maxRecoverySteps: 8
+  maxRecoverySteps: 8,
+  maxRules: 3
 });
 
 export function normalizeHarness(harness) {
-  return { preflight: [], ...harness };
+  return {
+    preflight: [],
+    rules: [],
+    ...harness,
+    context: { perceptionRadius: 0, ...(harness.context ?? {}) }
+  };
 }
 
 export function validateHarness(input) {
@@ -44,6 +67,9 @@ export function validateHarness(input) {
   if (!harness.preflight.every((step) => preflightTools.has(step))) return false;
   if (harness.recoverySteps.length < 1 || harness.recoverySteps.length > guardrails.maxRecoverySteps) return false;
   if (!harness.recoverySteps.every((step) => step in toolCatalog)) return false;
+  if (!Array.isArray(harness.rules) || harness.rules.length > guardrails.maxRules) return false;
+  if (!harness.rules.every((rule) => rule?.when in ruleCatalog.conditions && rule?.then in ruleCatalog.actions)) return false;
+  if (!contextOptions.perceptionRadius.includes(harness.context.perceptionRadius)) return false;
   return Number.isInteger(harness.maxRecoveryCycles)
     && harness.maxRecoveryCycles >= 1
     && harness.maxRecoveryCycles <= guardrails.maxRecoveryCycles;
@@ -54,6 +80,7 @@ export function simulateRun({ scenarioId, scenario: given, harness: input, fleet
   const harness = normalizeHarness(input);
   const scenario = given ? structuredClone(given) : materializeScenario(scenarioId);
   const worldBlocked = new Set(scenario.blockedEdges.map(([a, b]) => edgeKey(a, b)));
+  const temporary = new Set(scenario.temporaryEdges ?? []);
   const knownBlocked = new Set();
   const events = [];
   const encountered = new Map();
@@ -61,6 +88,8 @@ export function simulateRun({ scenarioId, scenario: given, harness: input, fleet
   let current = scenario.start;
   let route = null;
   let observedBlock = null;
+  let observedKind = null;
+  const observedNearby = new Set();
   let delivered = false;
   let requestedHelp = false;
   let budgetExceeded = false;
@@ -90,6 +119,7 @@ export function simulateRun({ scenarioId, scenario: given, harness: input, fleet
       record("edge_attempted", { from: current, to: next, edge: key });
       if (worldBlocked.has(key)) {
         observedBlock = key;
+        observedKind = null;
         encountered.set(key, (encountered.get(key) ?? 0) + 1);
         record("road_blocked", { from: current, to: next, edge: key, encounter: encountered.get(key) });
         return "blocked";
@@ -118,18 +148,25 @@ export function simulateRun({ scenarioId, scenario: given, harness: input, fleet
       fresh.forEach((edge) => knownBlocked.add(edge));
       record("fleet_memory_loaded", { edges: fresh, total: fleetMemory.length });
     } else if (step === "inspect_local") {
-      record("local_observation", { observedBlock });
+      const radius = harness.context.perceptionRadius;
+      toolCalls += radius; // one sensor sweep per extra hop
+      if (observedBlock) observedKind = temporary.has(observedBlock) ? "temporary" : "closure";
+      const seen = scanNearby(radius).filter((edge) => !temporary.has(edge) && edge !== observedBlock);
+      seen.forEach((edge) => observedNearby.add(edge));
+      record("local_observation", { observedBlock, kind: observedKind, nearby: seen, radius });
     } else if (step === "update_local_map") {
-      if (observedBlock) {
-        knownBlocked.add(observedBlock);
-        record("map_updated", { blockedEdge: observedBlock });
+      const closures = closuresToShare();
+      if (closures.length) {
+        closures.forEach((edge) => knownBlocked.add(edge));
+        record("map_updated", { blockedEdge: closures[0], edges: closures });
       } else {
         record("map_update_skipped", { reason: "No locally observed blockage" });
       }
     } else if (step === "report_road_event") {
-      if (observedBlock && !reportedEvents.includes(observedBlock)) {
-        reportedEvents.push(observedBlock);
-        record("road_event_reported", { edge: observedBlock });
+      for (const edge of closuresToShare()) {
+        if (reportedEvents.includes(edge)) continue;
+        reportedEvents.push(edge);
+        record("road_event_reported", { edge });
       }
     } else if (step === "replan") {
       route = plan();
@@ -140,6 +177,58 @@ export function simulateRun({ scenarioId, scenario: given, harness: input, fleet
       requestedHelp = true;
       record("assistance_requested", { reason: "No verified route remains", knownBlocked: [...knownBlocked] });
       return "done";
+    }
+    return "continue";
+  };
+
+  // Edges within `radius` hops of the vehicle that are actually blocked.
+  function scanNearby(radius) {
+    if (radius <= 0) return [];
+    const found = new Set();
+    let frontier = new Set([current]);
+    const visited = new Set([current]);
+    for (let hop = 0; hop < radius; hop += 1) {
+      const next = new Set();
+      for (const [a, b] of scenario.edges) {
+        const key = edgeKey(a, b);
+        if (!frontier.has(a) && !frontier.has(b)) continue;
+        if (worldBlocked.has(key)) found.add(key);
+        for (const node of [a, b]) if (!visited.has(node)) { visited.add(node); next.add(node); }
+      }
+      frontier = next;
+    }
+    return [...found];
+  }
+
+  // Closures the vehicle has evidence for. A known-temporary obstacle is never treated as a closure.
+  function closuresToShare() {
+    const edges = [...observedNearby];
+    if (observedBlock && observedKind !== "temporary" && !edges.includes(observedBlock)) edges.unshift(observedBlock);
+    return edges.filter((edge) => worldBlocked.has(edge));
+  }
+
+  const ruleConditions = {
+    temporary_obstacle: () => observedKind === "temporary" && worldBlocked.has(observedBlock),
+    repeated_block: () => [...encountered.values()].some((count) => count >= 2)
+  };
+
+  const fireRules = (cycle) => {
+    for (const rule of harness.rules) {
+      if (!ruleConditions[rule.when]()) continue;
+      record("rule_fired", { when: rule.when, then: rule.then, cycle });
+      toolCalls += 1;
+      if (rule.then === "wait_and_retry") {
+        if (temporary.has(observedBlock)) {
+          worldBlocked.delete(observedBlock);
+          record("obstacle_cleared", { edge: observedBlock });
+        }
+        return followRoute() === "delivered" ? "done" : "end_cycle";
+      }
+      if (rule.then === "request_help") {
+        requestedHelp = true;
+        record("assistance_requested", { reason: `Rule: ${rule.when}`, knownBlocked: [...knownBlocked] });
+        return "done";
+      }
     }
     return "continue";
   };
@@ -155,7 +244,8 @@ export function simulateRun({ scenarioId, scenario: given, harness: input, fleet
     cycles += 1;
     record("recovery_cycle_started", { cycle: cycles });
     for (const step of harness.recoverySteps) {
-      const result = callTool(step, cycles);
+      let result = callTool(step, cycles);
+      if (result === "continue") result = fireRules(cycles);
       if (result !== "continue") break;
     }
   }

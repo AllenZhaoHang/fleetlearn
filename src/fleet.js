@@ -23,7 +23,7 @@ export async function nextVersion(store) {
   return Math.max(...harnesses.map((item) => item.version), 0) + 1;
 }
 
-export async function evolveOnce(store, { sourceRunId } = {}) {
+export async function evolveOnce(store, { sourceRunId, searchOnly = false } = {}) {
   const sourceRun = sourceRunId ? await store.getRun(sourceRunId) : null;
   if (sourceRunId && !sourceRun) throw Object.assign(new Error("Source run not found"), { status: 404 });
   const sourceHarness = sourceRun ? await store.getHarness(sourceRun.harnessVersion) : await store.getActiveHarness();
@@ -31,7 +31,7 @@ export async function evolveOnce(store, { sourceRunId } = {}) {
     sourceHarness,
     sourceRun,
     version: await nextVersion(store),
-    modelProposer: modelProposer(),
+    modelProposer: searchOnly ? null : modelProposer(),
     rejected: await store.listRejected()
   });
   await store.saveHarness(candidate);
@@ -63,12 +63,12 @@ export async function evaluateAndRecord(store, candidateVersion) {
 }
 
 // Keeps evolving until the development set has nothing left to teach or a candidate fails the gate.
-export async function autoEvolve(store, { maxGenerations = 6, onStep = () => {} } = {}) {
+export async function autoEvolve(store, { maxGenerations = 8, searchOnly = false, onStep = () => {} } = {}) {
   const steps = [];
   for (let generation = 0; generation < maxGenerations; generation += 1) {
     let candidate;
     try {
-      candidate = await evolveOnce(store);
+      candidate = await evolveOnce(store, { searchOnly });
     } catch (error) {
       steps.push({ stopped: error.message });
       break;

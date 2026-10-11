@@ -32,7 +32,8 @@ export const families = {
   double_closure: "A second closure appears on the detour",
   unreachable: "Every approach to the destination is closed",
   reported: "Another vehicle already reported the closure",
-  convoy: "Two vehicles in sequence; the second can learn from the first"
+  convoy: "Two vehicles in sequence; the second can learn from the first",
+  temporary: "A delivery truck is unloading on the only approach; it will move"
 };
 
 export function edgeKey(a, b) {
@@ -73,6 +74,15 @@ const demoScenarios = [
     expected: "deliver"
   },
   {
+    id: "truck-at-door",
+    name: "Delivery truck unloading at the door",
+    description: "A truck blocks the only street into the resident's home. It is temporary: waiting works, rerouting can't.",
+    family: "temporary",
+    blockedEdges: [["f", "home"]],
+    temporaryEdges: ["f::home"],
+    expected: "deliver"
+  },
+  {
     id: "clear-streets",
     name: "No road disruption",
     description: "A regression check: the new harness must not slow down a normal delivery.",
@@ -80,7 +90,7 @@ const demoScenarios = [
     blockedEdges: [],
     expected: "deliver"
   }
-].map((s) => ({ ...s, split: "demo", start: "depot", goal: "home", priorReports: [], vehicles: 1 }));
+].map((s) => ({ temporaryEdges: [], ...s, split: "demo", start: "depot", goal: "home", priorReports: [], vehicles: 1 }));
 
 // ---------- procedural maps ----------
 
@@ -178,8 +188,15 @@ function buildFamily(family, nodes, edges, random) {
     return edge;
   };
 
-  const out = { blockedEdges: [], priorReports: [], vehicles: 1, expected: "deliver" };
+  const out = { blockedEdges: [], temporaryEdges: [], priorReports: [], vehicles: 1, expected: "deliver" };
   if (family === "clear") return out;
+  if (family === "temporary") {
+    // A truck on the final connector: there is no detour, only waiting.
+    const [a, b] = edges.find(([x, y]) => x === "home" || y === "home");
+    out.blockedEdges = [[a, b]];
+    out.temporaryEdges = [edgeKey(a, b)];
+    return out;
+  }
   if (family === "unreachable") {
     // Close every street into the last intersection before the destination.
     const hubEdge = edges.find(([a, b]) => a === "home" || b === "home");

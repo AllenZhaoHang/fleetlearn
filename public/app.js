@@ -11,7 +11,7 @@ const state = {
 const elements = Object.fromEntries([
   "storage-pill", "memory-pill", "harness-pill", "scenario-select", "scenario-title", "road-map",
   "map-caption", "run-button", "evolve-button", "shortcut-button", "evaluate-button", "activate-button", "auto-button",
-  "reset-button", "harness-name", "policy-state", "procedure-list", "trace-log", "trace-count",
+  "reset-button", "search-only", "harness-name", "policy-state", "procedure-list", "trace-log", "trace-count",
   "learning-title", "diagnosis-copy", "proposer-copy", "before-policy", "after-policy", "success-metric",
   "success-detail", "repeat-metric", "repeat-detail", "safety-metric", "safety-detail",
   "gate-result", "lineage-list", "holdout-copy", "toast"
@@ -98,7 +98,9 @@ function renderMap(data) {
 function procedureLines(harness) {
   return [
     ...(harness.preflight ?? []).map((step) => ({ step, preflight: true })),
-    ...harness.recoverySteps.map((step) => ({ step, preflight: false }))
+    ...harness.recoverySteps.map((step) => ({ step, preflight: false })),
+    ...(harness.rules ?? []).map((rule) => ({ step: `if ${rule.when} → ${rule.then}`, rule: true })),
+    ...((harness.context?.perceptionRadius ?? 0) > 0 ? [{ step: `perception radius ${harness.context.perceptionRadius}`, context: true }] : [])
   ];
 }
 
@@ -107,10 +109,10 @@ function renderProcedure(harness = activeHarness()) {
   elements["harness-name"].textContent = harness.name;
   elements["harness-pill"].textContent = `Harness v${harness.version}`;
   elements["policy-state"].textContent = harness.status === "active" ? "Active" : "Candidate";
-  elements["procedure-list"].replaceChildren(...procedureLines(harness).map(({ step, preflight }) => {
+  elements["procedure-list"].replaceChildren(...procedureLines(harness).map(({ step, preflight, rule, context }) => {
     const item = document.createElement("li");
-    item.className = `procedure-item${preflight ? " preflight" : ""}`;
-    item.dataset.step = step;
+    item.className = `procedure-item${preflight ? " preflight" : ""}${rule ? " rule" : ""}${context ? " context" : ""}`;
+    item.dataset.step = rule ? `rule:${step}` : step;
     item.textContent = preflight ? `${step} (before departure)` : step;
     item.title = state.overview?.toolCatalog?.[step] ?? "";
     return item;
@@ -123,7 +125,7 @@ function renderPolicy(container, harness, compareTo = null) {
   const lines = procedureLines(harness);
   container.replaceChildren(...lines.map((line, index) => {
     const span = document.createElement("span");
-    span.textContent = line.preflight ? `pre. ${line.step}` : `${index + 1 - (harness.preflight?.length ?? 0)}. ${line.step}`;
+    span.textContent = line.preflight ? `pre. ${line.step}` : line.rule || line.context ? `   ${line.step}` : `${index + 1 - (harness.preflight?.length ?? 0)}. ${line.step}`;
     if (line.preflight) span.classList.add("preflight");
     if (previous && !previous.has(`${line.preflight}:${line.step}`)) span.classList.add("added");
     return span;
@@ -137,7 +139,9 @@ function renderLineage() {
     const item = document.createElement("li");
     item.className = `lineage-item ${harness.status}`;
     const evaluation = byCandidate.get(harness.version);
-    const steps = `${(harness.preflight ?? []).length ? `[${harness.preflight.join(", ")}] ` : ""}${harness.recoverySteps.join(" → ")}`;
+    const rules = (harness.rules ?? []).map((rule) => `if ${rule.when} → ${rule.then}`).join("; ");
+    const radius = harness.context?.perceptionRadius ? ` · radius ${harness.context.perceptionRadius}` : "";
+    const steps = `${(harness.preflight ?? []).length ? `[${harness.preflight.join(", ")}] ` : ""}${harness.recoverySteps.join(" → ")}${rules ? ` · ${rules}` : ""}${radius}`;
     const why = harness.diagnosis ? `${harness.diagnosis.code}: ${harness.diagnosis.evidence}` : harness.rationale;
     const result = evaluation
       ? ` Holdout: ${evaluation.baselineMetrics.correctOutcomes} → ${evaluation.candidateMetrics.correctOutcomes}/${evaluation.candidateMetrics.scenarios} correct, blocked roads ${evaluation.baselineMetrics.blockedEncounters} → ${evaluation.candidateMetrics.blockedEncounters}.`
@@ -158,6 +162,7 @@ function setButtons() {
   const locked = state.busy;
   elements["run-button"].disabled = locked;
   elements["auto-button"].disabled = locked;
+  elements["search-only"].disabled = locked;
   elements["reset-button"].disabled = locked;
   elements["evolve-button"].disabled = locked || !state.run;
   elements["shortcut-button"].disabled = locked || !state.run;
@@ -179,8 +184,13 @@ function traceMessage(event) {
     recovery_cycle_started: () => `Recovery cycle ${event.cycle} started`,
     tool_called: () => `Called ${event.tool}`,
     fleet_memory_loaded: () => event.edges?.length ? `Fleet memory: avoiding ${event.edges.map(edgeLabel).join(", ")}` : "Fleet memory: no reported closures here",
-    local_observation: () => event.observedBlock ? `Observed closure ${edgeLabel(event.observedBlock)}` : "No nearby closure observed",
-    map_updated: () => `Task map now excludes ${edgeLabel(event.blockedEdge)}`,
+    local_observation: () => [
+      event.observedBlock ? `Inspected ${edgeLabel(event.observedBlock)}: ${event.kind === "temporary" ? "a truck that will move" : "a closure"}` : "Nothing directly ahead",
+      event.nearby?.length ? `; also sees ${event.nearby.map(edgeLabel).join(", ")} (radius ${event.radius})` : ""
+    ].join(""),
+    rule_fired: () => `Rule fired: if ${event.when} → ${event.then}`,
+    obstacle_cleared: () => `Waited; ${edgeLabel(event.edge)} is clear again`,
+    map_updated: () => `Task map now excludes ${(event.edges ?? [event.blockedEdge]).map(edgeLabel).join(", ")}`,
     map_update_skipped: () => "No observed closure to add to the map",
     road_event_reported: () => `Reported ${edgeLabel(event.edge)} to fleet memory in Atlas`,
     route_planned: () => event.route ? `Route: ${event.route.map(label).join(" → ")}` : "No verified route remains",
@@ -194,7 +204,7 @@ function traceMessage(event) {
 
 function traceClass(event) {
   if (["road_blocked", "run_stopped"].includes(event.type)) return "bad";
-  if (["delivery_completed", "map_updated", "assistance_requested", "road_event_reported", "fleet_memory_loaded"].includes(event.type)) return "good";
+  if (["delivery_completed", "map_updated", "assistance_requested", "road_event_reported", "fleet_memory_loaded", "rule_fired", "obstacle_cleared"].includes(event.type)) return "good";
   if (event.type === "tool_called") return "tool";
   return "";
 }
@@ -226,12 +236,19 @@ async function animateEvent(event, data) {
     elements["map-caption"].textContent = "The vehicle sees a closure that the planner map does not know about.";
   }
   if (event.type === "map_updated") {
-    document.querySelector(`[data-edge-center="${event.blockedEdge}"]`)?.classList.add("known");
+    (event.edges ?? [event.blockedEdge]).forEach((edge) => document.querySelector(`[data-edge-center="${edge}"]`)?.classList.add("known"));
     elements["map-caption"].textContent = "Local evidence has been promoted into the task map.";
   }
   if (event.type === "fleet_memory_loaded" && event.edges?.length) {
     event.edges.forEach((edge) => document.querySelector(`[data-edge-center="${edge}"]`)?.classList.add("known"));
     elements["map-caption"].textContent = "Closures reported by earlier vehicles were loaded from Atlas before departure.";
+  }
+  if (event.type === "obstacle_cleared") {
+    document.querySelector(`[data-barrier="${event.edge}"]`)?.classList.remove("revealed");
+    elements["map-caption"].textContent = "The truck moved on. Waiting beat rerouting.";
+  }
+  if (event.type === "rule_fired") {
+    document.querySelectorAll(".procedure-item").forEach((item) => item.classList.toggle("active", item.dataset.step === `rule:if ${event.when} → ${event.then}`));
   }
   if (event.type === "road_event_reported") elements["map-caption"].textContent = "Closure published to fleet memory. The next vehicle will plan around it.";
   if (event.type === "tool_called") {
@@ -279,13 +296,13 @@ async function evolveHarness(kind = "evolve") {
     const parent = activeHarness();
     state.evaluation = null;
     resetEvaluationView();
-    state.candidate = await api(`/api/${kind}`, { method: "POST", body: JSON.stringify({ runId: state.run.runId }) });
+    state.candidate = await api(`/api/${kind}`, { method: "POST", body: JSON.stringify({ runId: state.run.runId, searchOnly: elements["search-only"].checked }) });
     const { diagnosis, devMetrics, proposer, candidatesConsidered, modelError } = state.candidate;
     elements["learning-title"].textContent = diagnosis.summary;
     elements["diagnosis-copy"].textContent = `${diagnosis.code}. Evidence: ${diagnosis.evidence} Proposed change: ${state.candidate.changes.join("; ")}.`;
     elements["proposer-copy"].textContent = kind === "shortcut"
       ? `Proposed by a ${proposer}: ${state.candidate.rationale} Will the fixed gate catch it?`
-      : `${candidatesConsidered} candidates scored on ${devMetrics.parent.scenarios} development scenarios; winner from ${proposer}. `
+      : `${candidatesConsidered} candidates scored on ${devMetrics.parent.scenarios} development scenarios${state.candidate.searchDepth === 2 ? " (single edits stopped helping, so search widened to 2-edit combinations)" : ""}; winner from ${proposer}. `
         + `Development: correct ${devMetrics.parent.correctOutcomes} → ${devMetrics.candidate.correctOutcomes}, blocked roads ${devMetrics.parent.blockedEncounters} → ${devMetrics.candidate.blockedEncounters}.`
         + (modelError ? ` (Model unavailable: ${modelError})` : "");
     renderPolicy(elements["before-policy"], parent);
@@ -363,7 +380,7 @@ async function autoEvolve() {
   setBusy(true);
   try {
     const before = activeHarness()?.version;
-    const result = await api("/api/auto-evolve", { method: "POST", body: JSON.stringify({ maxGenerations: 6 }) });
+    const result = await api("/api/auto-evolve", { method: "POST", body: JSON.stringify({ maxGenerations: 8, searchOnly: elements["search-only"].checked }) });
     await refreshOverview();
     renderProcedure(activeHarness());
     renderPolicy(elements["before-policy"], activeHarness());

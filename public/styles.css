@@ -300,6 +300,9 @@ footer { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 25px 0 
 }
 
 .secondary-button.subtle { color: var(--muted); }
+.proposer-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; padding: 0 6px; }
+.procedure-item.rule { border-style: dashed; color: var(--green-dark); }
+.procedure-item.context { border-style: dotted; color: var(--muted); }
 #shortcut-button:not(:disabled) { border-style: dashed; }
 .family-diff { display: block; margin-top: 4px; }
 .proposer-copy { margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.5; }

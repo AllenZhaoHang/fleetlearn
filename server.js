@@ -3,7 +3,7 @@ import express from "express";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { developmentSet, families, holdoutSet, materializeScenario, scenarios } from "./src/scenarios.js";
-import { guardrails, toolCatalog } from "./src/simulator.js";
+import { contextOptions, guardrails, ruleCatalog, toolCatalog } from "./src/simulator.js";
 import { gatePolicy } from "./src/evolver.js";
 import { configuredModel } from "./src/model-proposer.js";
 import { autoEvolve, evaluateAndRecord, evolveOnce, runLive, shortcutOnce } from "./src/fleet.js";
@@ -43,6 +43,8 @@ app.get("/api/overview", asyncRoute(async (_request, response) => {
     scenarios,
     families,
     toolCatalog,
+    ruleCatalog,
+    contextOptions,
     guardrails,
     gatePolicy,
     developmentScenarios: developmentSet.length,
@@ -69,7 +71,7 @@ app.post("/api/runs", asyncRoute(async (request, response) => {
 }));
 
 app.post("/api/evolve", asyncRoute(async (request, response) => {
-  const candidate = await evolveOnce(store, { sourceRunId: request.body.runId });
+  const candidate = await evolveOnce(store, { sourceRunId: request.body.runId, searchOnly: Boolean(request.body.searchOnly) });
   response.status(201).json(candidate);
 }));
 
@@ -94,7 +96,10 @@ app.post("/api/harnesses/:version/activate", asyncRoute(async (request, response
 }));
 
 app.post("/api/auto-evolve", asyncRoute(async (request, response) => {
-  const steps = await autoEvolve(store, { maxGenerations: Math.min(Number(request.body.maxGenerations ?? 6), 10) });
+  const steps = await autoEvolve(store, {
+    maxGenerations: Math.min(Number(request.body.maxGenerations ?? 8), 10),
+    searchOnly: Boolean(request.body.searchOnly)
+  });
   response.json({
     steps: steps.map((step) => step.stopped ? step : {
       version: step.candidate.version,

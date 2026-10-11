@@ -12,7 +12,7 @@ test("baseline repeats a blocked road because the task map stays stale", () => {
 });
 
 test("generated holdout cities are frozen, distinct from development, and solvable", () => {
-  assert.equal(holdoutSet.length, 36);
+  assert.equal(holdoutSet.length, 42);
   assert.ok(Object.isFrozen(holdoutSet[0].blockedEdges));
   const devIds = new Set(developmentSet.map((s) => s.id));
   assert.ok(holdoutSet.every((s) => !devIds.has(s.id)));
@@ -62,17 +62,48 @@ test("convoy: the second vehicle avoids the closure only if the first one report
   assert.equal(secondSharing.metrics.blockedEncounters, 0);
 });
 
-test("four generations of local search reach every holdout family", async () => {
+test("local search alone evolves through every holdout family, widening to 2-edit combinations when needed", async () => {
   let harness = baselineHarness;
-  for (let version = 2; version <= 5; version += 1) {
-    const candidate = await proposeHarness({ sourceHarness: harness, version });
+  const depths = [];
+  for (let version = 2; version <= 10; version += 1) {
+    let candidate;
+    try {
+      candidate = await proposeHarness({ sourceHarness: harness, version });
+    } catch {
+      break;
+    }
     const evaluation = evaluateCandidate({ baseline: harness, candidate });
     assert.equal(evaluation.accepted, true, `v${version} should pass the gate`);
+    depths.push(candidate.searchDepth);
     harness = candidate;
   }
   const final = evaluateOn(harness, holdoutSet).metrics;
   assert.equal(final.correctOutcomes, holdoutSet.length);
   assert.equal(final.unsafeActions, 0);
+  assert.ok(depths.includes(2), "at least one generation needs a 2-edit combination");
+  assert.ok(harness.rules.some((rule) => rule.when === "temporary_obstacle" && rule.then === "wait_and_retry"));
+});
+
+test("a temporary truck needs inspection plus a conditional wait; rerouting alone asks for help", () => {
+  const reroute = { ...baselineHarness, recoverySteps: ["update_local_map", "replan", "follow_route", "request_help"] };
+  const waiting = { ...reroute, recoverySteps: ["inspect_local", ...reroute.recoverySteps], rules: [{ when: "temporary_obstacle", then: "wait_and_retry" }] };
+  assert.equal(simulateRun({ scenarioId: "truck-at-door", harness: reroute }).status, "help_requested");
+  const run = simulateRun({ scenarioId: "truck-at-door", harness: waiting });
+  assert.equal(run.status, "delivered");
+  assert.ok(run.events.some((event) => event.type === "obstacle_cleared"));
+  // The same rule must not fire on a real closure.
+  const closure = simulateRun({ scenarioId: "construction-main", harness: waiting });
+  assert.equal(closure.status, "delivered");
+  assert.equal(closure.events.some((event) => event.type === "rule_fired"), false);
+});
+
+test("a wider perception radius finds a second closure before driving into it", () => {
+  const harness = { ...baselineHarness, recoverySteps: ["inspect_local", "update_local_map", "replan", "follow_route"] };
+  const narrow = simulateRun({ scenarioId: "holdout-double_closure-103", harness });
+  const wide = simulateRun({ scenarioId: "holdout-double_closure-103", harness: { ...harness, context: { perceptionRadius: 2 } } });
+  assert.equal(narrow.status, "delivered");
+  assert.equal(wide.status, "delivered");
+  assert.ok(wide.metrics.blockedEncounters < narrow.metrics.blockedEncounters);
 });
 
 test("giving up early does not count as fewer blocked roads", () => {

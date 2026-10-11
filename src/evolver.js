@@ -1,5 +1,5 @@
 import { developmentSet, holdoutSet } from "./scenarios.js";
-import { guardrails, normalizeHarness, runScenario, toolCatalog, validateHarness } from "./simulator.js";
+import { contextOptions, guardrails, normalizeHarness, ruleCatalog, runScenario, toolCatalog, validateHarness } from "./simulator.js";
 
 // ---------- diagnosis: turn traces into named failure patterns ----------
 
@@ -24,6 +24,14 @@ const issueCatalog = {
     summary: "The vehicle drove into a closure that fleet memory already contained.",
     hint: "Read fleet memory before planning the first route."
   },
+  CLOSURES_FOUND_ONE_AT_A_TIME: {
+    summary: "The vehicle discovered closures one by one by driving into them.",
+    hint: "Perceive more of the surroundings per inspection so nearby closures are known before replanning."
+  },
+  TEMPORARY_OBSTACLE_MISHANDLED: {
+    summary: "A temporary obstacle was treated as a permanent closure.",
+    hint: "Inspect obstacles before treating them as closures, and wait when they are temporary."
+  },
   FLEET_KNOWLEDGE_NOT_SHARED: {
     summary: "A later vehicle hit the same closure as an earlier one, because nothing was reported.",
     hint: "Publish observed closures so later vehicles can avoid them."
@@ -46,6 +54,14 @@ export function diagnoseRun(run, previousRunsInScenario = []) {
   if (run.metrics.budgetExceeded) add("TOOL_BUDGET_EXCEEDED", `Stopped at ${guardrails.maxToolCallsPerRun} tool calls.`);
   else if (run.status === "failed" && has("map_updated") && run.scenario.expected === "deliver") {
     add("RECOVERY_BUDGET_EXHAUSTED", `Delivery failed after ${run.events.filter((e) => e.type === "recovery_cycle_started").length} recovery cycles.`);
+  }
+  const distinctBlocks = new Set(run.events.filter((e) => e.type === "road_blocked").map((e) => e.edge));
+  if (run.expectedSatisfied && distinctBlocks.size >= 2) {
+    add("CLOSURES_FOUND_ONE_AT_A_TIME", `${distinctBlocks.size} different closures were each found by hitting them.`);
+  }
+  const temporaryHit = run.events.find((e) => e.type === "road_blocked" && (run.scenario.temporaryEdges ?? []).includes(e.edge));
+  if (temporaryHit && !run.expectedSatisfied) {
+    add("TEMPORARY_OBSTACLE_MISHANDLED", `The obstacle on ${road(temporaryHit.edge)} was a truck that would have moved; the vehicle ${run.metrics.requestedHelp ? "asked for help" : "gave up"} instead of waiting.`);
   }
   if (run.metrics.knownClosuresRediscovered > 0) {
     add("KNOWN_CLOSURE_REDISCOVERED", `${run.metrics.knownClosuresRediscovered} closure(s) were already in fleet memory.`);
@@ -114,41 +130,69 @@ export function compareMetrics(a, b) {
 
 // ---------- proposal: model suggestions + local search over the tool surface ----------
 
-const signature = (h) => JSON.stringify([h.preflight, h.recoverySteps, h.maxRecoveryCycles]);
+const signature = (input) => {
+  const h = normalizeHarness(input);
+  return JSON.stringify([h.preflight, h.recoverySteps, h.maxRecoveryCycles, h.rules.map((r) => `${r.when}>${r.then}`), h.context.perceptionRadius]);
+};
 
+const shapeOf = (h) => ({
+  preflight: h.preflight,
+  recoverySteps: h.recoverySteps,
+  maxRecoveryCycles: h.maxRecoveryCycles,
+  rules: h.rules,
+  context: h.context
+});
+
+// Every single edit of the harness: tools, order, cycles, preflight, conditional rules, perception radius.
 function neighbors(parent) {
   const h = normalizeHarness(parent);
+  const base = shapeOf(h);
   const out = [];
-  const push = (preflight, recoverySteps, maxRecoveryCycles) => out.push({ preflight, recoverySteps, maxRecoveryCycles });
+  const push = (overrides) => out.push({ ...base, ...overrides });
   const steps = h.recoverySteps;
   for (const tool of Object.keys(toolCatalog)) {
-    for (let i = 0; i <= steps.length; i += 1) push(h.preflight, [...steps.slice(0, i), tool, ...steps.slice(i)], h.maxRecoveryCycles);
+    for (let i = 0; i <= steps.length; i += 1) push({ recoverySteps: [...steps.slice(0, i), tool, ...steps.slice(i)] });
   }
-  steps.forEach((_, i) => push(h.preflight, steps.filter((__, j) => j !== i), h.maxRecoveryCycles));
+  steps.forEach((_, i) => push({ recoverySteps: steps.filter((__, j) => j !== i) }));
   for (let i = 0; i + 1 < steps.length; i += 1) {
     const swapped = [...steps];
     [swapped[i], swapped[i + 1]] = [swapped[i + 1], swapped[i]];
-    push(h.preflight, swapped, h.maxRecoveryCycles);
+    push({ recoverySteps: swapped });
   }
-  push(h.preflight, steps, h.maxRecoveryCycles + 1);
-  push(h.preflight, steps, h.maxRecoveryCycles - 1);
-  push(h.preflight.includes("query_fleet_memory") ? [] : ["query_fleet_memory"], steps, h.maxRecoveryCycles);
+  push({ maxRecoveryCycles: h.maxRecoveryCycles + 1 });
+  push({ maxRecoveryCycles: h.maxRecoveryCycles - 1 });
+  push({ preflight: h.preflight.includes("query_fleet_memory") ? [] : ["query_fleet_memory"] });
+  for (const when of Object.keys(ruleCatalog.conditions)) {
+    for (const then of Object.keys(ruleCatalog.actions)) {
+      if (!h.rules.some((r) => r.when === when && r.then === then)) push({ rules: [...h.rules, { when, then }] });
+    }
+  }
+  h.rules.forEach((_, i) => push({ rules: h.rules.filter((__, j) => j !== i) }));
+  for (const radius of contextOptions.perceptionRadius) {
+    if (Math.abs(radius - h.context.perceptionRadius) === 1) push({ context: { ...h.context, perceptionRadius: radius } });
+  }
   return out;
 }
 
-export function describeChange(parent, child) {
+const ruleText = (r) => `if ${r.when} → ${r.then}`;
+
+export function describeChange(parent, childInput) {
   const p = normalizeHarness(parent);
+  const child = normalizeHarness(childInput);
   const changes = [];
   const added = child.recoverySteps.filter((step) => !p.recoverySteps.includes(step));
   const removed = p.recoverySteps.filter((step) => !child.recoverySteps.includes(step));
   if (added.length) changes.push(`add ${added.join(", ")}`);
   if (removed.length) changes.push(`remove ${removed.join(", ")}`);
-  if (!added.length && !removed.length && signature({ ...p, maxRecoveryCycles: 0 }) !== signature({ ...child, maxRecoveryCycles: 0 })) {
-    if (JSON.stringify(p.recoverySteps) !== JSON.stringify(child.recoverySteps)) changes.push("reorder recovery steps");
-  }
+  if (!added.length && !removed.length && JSON.stringify(p.recoverySteps) !== JSON.stringify(child.recoverySteps)) changes.push("reorder recovery steps");
   if (child.preflight.length > p.preflight.length) changes.push("query fleet memory before departure");
   if (child.preflight.length < p.preflight.length) changes.push("stop reading fleet memory before departure");
   if (child.maxRecoveryCycles !== p.maxRecoveryCycles) changes.push(`recovery cycles ${p.maxRecoveryCycles} → ${child.maxRecoveryCycles}`);
+  const pr = p.rules.map(ruleText);
+  const cr = child.rules.map(ruleText);
+  cr.filter((r) => !pr.includes(r)).forEach((r) => changes.push(`add rule: ${r}`));
+  pr.filter((r) => !cr.includes(r)).forEach((r) => changes.push(`remove rule: ${r}`));
+  if (child.context.perceptionRadius !== p.context.perceptionRadius) changes.push(`perception radius ${p.context.perceptionRadius} → ${child.context.perceptionRadius}`);
   return changes;
 }
 
@@ -170,7 +214,7 @@ export async function proposeHarness({ sourceHarness, sourceRun, version, modelP
   const pool = [];
   const seen = new Set([signature(parent), ...rejectedSigs]);
   const consider = (shape, proposer, rationale) => {
-    const candidate = { ...shape, preflight: shape.preflight ?? [] };
+    const candidate = shapeOf(normalizeHarness({ ...shape, preflight: shape.preflight ?? [] }));
     if (!validateHarness(candidate) || seen.has(signature(candidate))) return;
     seen.add(signature(candidate));
     pool.push({ candidate, proposer, rationale, dev: evaluateOn(candidate, developmentSet).metrics });
@@ -179,18 +223,30 @@ export async function proposeHarness({ sourceHarness, sourceRun, version, modelP
   let modelInfo = null;
   if (modelProposer) {
     try {
-      modelInfo = await modelProposer({ harness: parent, issues, sourceRun, toolCatalog, guardrails, rejected });
+      modelInfo = await modelProposer({ harness: parent, issues, sourceRun, toolCatalog, ruleCatalog, contextOptions, guardrails, rejected });
       for (const item of modelInfo?.candidates ?? []) consider(item, modelInfo.model, item.rationale);
     } catch (error) {
       modelInfo = { error: error.message };
     }
   }
-  for (const shape of neighbors(parent)) consider(shape, "local-search", null);
+  const singles = neighbors(parent);
+  for (const shape of singles) consider(shape, "local-search", null);
+  const improves = (entry) => compareMetrics(entry.dev, parentEval.metrics) > 0;
 
-  const improving = pool.filter((entry) => compareMetrics(entry.dev, parentEval.metrics) > 0);
+  // When no single edit helps, widen the search to pairs of edits.
+  let searchDepth = 1;
+  if (!pool.some(improves)) {
+    searchDepth = 2;
+    for (const first of singles) {
+      if (!validateHarness(first)) continue;
+      for (const shape of neighbors({ ...first, version: parent.version })) consider(shape, "local-search (2 edits)", null);
+    }
+  }
+
+  const improving = pool.filter(improves);
   if (!improving.length) throw new Error("No candidate improved on the development set.");
   improving.sort((a, b) => compareMetrics(b.dev, a.dev)
-    || (a.proposer === "local-search") - (b.proposer === "local-search")
+    || a.proposer.startsWith("local-search") - b.proposer.startsWith("local-search")
     || a.candidate.recoverySteps.length - b.candidate.recoverySteps.length);
   const best = improving[0];
 
@@ -204,6 +260,8 @@ export async function proposeHarness({ sourceHarness, sourceRun, version, modelP
     preflight: best.candidate.preflight,
     recoverySteps: best.candidate.recoverySteps,
     maxRecoveryCycles: best.candidate.maxRecoveryCycles,
+    rules: best.candidate.rules,
+    context: best.candidate.context,
     changes,
     rationale: best.rationale ?? `${primary.hint} Change: ${changes.join("; ")}.`,
     diagnosis: { code: primary.code, summary: primary.summary, evidence: primary.evidence, proposedChange: changes.join("; ") },
@@ -211,10 +269,9 @@ export async function proposeHarness({ sourceHarness, sourceRun, version, modelP
     proposer: best.proposer,
     modelError: modelInfo?.error,
     candidatesConsidered: pool.length,
-    modelCandidates: pool.filter((entry) => entry.proposer !== "local-search").map((entry) => ({
-      recoverySteps: entry.candidate.recoverySteps,
-      preflight: entry.candidate.preflight,
-      maxRecoveryCycles: entry.candidate.maxRecoveryCycles,
+    searchDepth,
+    modelCandidates: pool.filter((entry) => !entry.proposer.startsWith("local-search")).map((entry) => ({
+      ...entry.candidate,
       correctOutcomes: entry.dev.correctOutcomes,
       blockedEncounters: entry.dev.blockedEncounters
     })),
@@ -237,13 +294,14 @@ export function proposeShortcut({ sourceHarness, sourceRun, version, rejected = 
 
   const options = neighbors(parent)
     .filter((shape) => validateHarness(shape) && !skip.has(signature(shape)))
-    .filter((shape) => shape.recoverySteps.length + shape.preflight.length < parent.recoverySteps.length + parent.preflight.length
-      || shape.maxRecoveryCycles < parent.maxRecoveryCycles)
+    .filter((shape) => sizeOf(shape) < sizeOf(parent)
+      || shape.maxRecoveryCycles < parent.maxRecoveryCycles
+      || shape.context.perceptionRadius < parent.context.perceptionRadius)
     .filter(stillHandlesSource)
     .map((shape) => ({
       shape,
       sourceCost: sourceRun ? simulateRunLike(sourceRun, shape).metrics.toolCalls : 0,
-      size: shape.recoverySteps.length + shape.preflight.length,
+      size: sizeOf(shape),
       dev: evaluateOn(shape, developmentSet).metrics
     }))
     .sort((a, b) => a.sourceCost - b.sourceCost || a.size - b.size);
@@ -259,6 +317,8 @@ export function proposeShortcut({ sourceHarness, sourceRun, version, rejected = 
     preflight: shape.preflight,
     recoverySteps: shape.recoverySteps,
     maxRecoveryCycles: shape.maxRecoveryCycles,
+    rules: shape.rules,
+    context: shape.context,
     changes,
     rationale: `A shorter procedure${sourceRun?.expectedSatisfied ? " that still handles the run you just watched" : ""}. Only that one run was checked; the other disruption types were not.`,
     diagnosis: {
@@ -276,6 +336,8 @@ export function proposeShortcut({ sourceHarness, sourceRun, version, rejected = 
     createdAt: new Date().toISOString()
   };
 }
+
+const sizeOf = (h) => h.recoverySteps.length + h.preflight.length + h.rules.length;
 
 function simulateRunLike(run, harness) {
   return runScenario({ ...run.scenario, vehicles: 1 }, harness)[0];
