@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="FleetLearn turns delivery-road failures into evaluated, versioned fleet recovery procedures." />
+    <title>FleetLearn — Roads change. The fleet learns.</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="FleetLearn home">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>FleetLearn</span>
+      </a>
+      <div class="status-line">
+        <span id="storage-pill" class="status-pill waiting"><i></i> Connecting</span>
+        <span id="harness-pill" class="version-pill">Harness v—</span>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="intro">
+        <p class="eyebrow">Recursive harnessing for last-mile delivery</p>
+        <h1>Roads change.<br /><span>The fleet learns.</span></h1>
+        <p class="intro-copy">
+          FleetLearn turns one failed community-meal delivery into a tested recovery procedure
+          that every later vehicle can use.
+        </p>
+      </section>
+
+      <section class="workspace" aria-label="Fleet learning simulation">
+        <article class="map-card">
+          <div class="card-heading">
+            <div>
+              <p class="section-label">Live mission</p>
+              <h2 id="scenario-title">Construction on the main route</h2>
+            </div>
+            <label class="scenario-picker">
+              <span>Road condition</span>
+              <select id="scenario-select" aria-label="Choose road scenario"></select>
+            </label>
+          </div>
+
+          <div class="map-stage" id="map-stage">
+            <svg id="road-map" viewBox="0 0 790 540" role="img" aria-label="Street graph with a delivery vehicle"></svg>
+            <div id="map-caption" class="map-caption">The planner begins with a stale road map.</div>
+          </div>
+
+          <div class="mission-controls">
+            <button id="run-button" class="primary-button">
+              <span class="button-icon">▶</span>
+              Run active harness
+            </button>
+            <button id="evolve-button" class="secondary-button" disabled>Generate improvement</button>
+            <button id="evaluate-button" class="secondary-button" disabled>Evaluate candidate</button>
+            <button id="activate-button" class="secondary-button" disabled>Activate fleet-wide</button>
+          </div>
+        </article>
+
+        <aside class="harness-card">
+          <div class="card-heading compact">
+            <div>
+              <p class="section-label">Executable policy</p>
+              <h2 id="harness-name">Static-map recovery</h2>
+            </div>
+            <span id="policy-state" class="policy-state">Active</span>
+          </div>
+
+          <ol id="procedure-list" class="procedure-list"></ol>
+
+          <div class="trace-header">
+            <span>Vehicle trace</span>
+            <span id="trace-count">0 events</span>
+          </div>
+          <div id="trace-log" class="trace-log" aria-live="polite">
+            <div class="empty-trace">Run a delivery to generate evidence.</div>
+          </div>
+        </aside>
+      </section>
+
+      <section id="learning-panel" class="learning-panel" aria-live="polite">
+        <div class="learning-copy">
+          <p class="section-label">Evidence-backed evolution</p>
+          <h2 id="learning-title">One failure becomes a reusable procedure.</h2>
+          <p id="diagnosis-copy">
+            The harness can revise tool order and escalation logic, while collision rules,
+            evaluation scenarios, and safety gates remain fixed.
+          </p>
+        </div>
+
+        <div class="policy-diff">
+          <div class="policy-column">
+            <span class="column-label">Before</span>
+            <div id="before-policy" class="policy-code"></div>
+          </div>
+          <div class="diff-arrow" aria-hidden="true">→</div>
+          <div class="policy-column">
+            <span class="column-label">Candidate</span>
+            <div id="after-policy" class="policy-code muted">Waiting for a failed run</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="evidence-section">
+        <div class="evidence-heading">
+          <div>
+            <p class="section-label">Fixed holdout evaluation</p>
+            <h2>Earn the right to deploy.</h2>
+          </div>
+          <p>New policies face unseen road layouts. A candidate activates only when every gate passes.</p>
+        </div>
+
+        <div class="evidence-grid">
+          <div class="metric-pair">
+            <span>Correct outcomes</span>
+            <strong id="success-metric">—</strong>
+            <small id="success-detail">Run an evaluation</small>
+          </div>
+          <div class="metric-pair">
+            <span>Repeated blockages</span>
+            <strong id="repeat-metric">—</strong>
+            <small id="repeat-detail">Run an evaluation</small>
+          </div>
+          <div class="metric-pair">
+            <span>Unsafe actions</span>
+            <strong id="safety-metric">—</strong>
+            <small id="safety-detail">Must remain zero</small>
+          </div>
+          <div id="gate-result" class="gate-result waiting">
+            <span class="gate-icon">○</span>
+            <div><strong>Evaluation pending</strong><small>Candidate has not been tested.</small></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Built for the Harness Engineering &amp; Model Wrangling Hackathon</span>
+      <span>MongoDB Atlas stores runs, policies, and evaluations</span>
+    </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

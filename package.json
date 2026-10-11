@@ -1,0 +1,20 @@
+{
+  "name": "fleetlearn",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A self-improving delivery-fleet harness that learns recovery procedures from road failures.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongodb": "^6.13.0"
+  }
+}
