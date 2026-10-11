@@ -10,7 +10,7 @@ const state = {
 
 const elements = Object.fromEntries([
   "storage-pill", "memory-pill", "harness-pill", "scenario-select", "scenario-title", "road-map",
-  "map-caption", "run-button", "evolve-button", "evaluate-button", "activate-button", "auto-button",
+  "map-caption", "run-button", "evolve-button", "shortcut-button", "evaluate-button", "activate-button", "auto-button",
   "reset-button", "harness-name", "policy-state", "procedure-list", "trace-log", "trace-count",
   "learning-title", "diagnosis-copy", "proposer-copy", "before-policy", "after-policy", "success-metric",
   "success-detail", "repeat-metric", "repeat-detail", "safety-metric", "safety-detail",
@@ -160,6 +160,7 @@ function setButtons() {
   elements["auto-button"].disabled = locked;
   elements["reset-button"].disabled = locked;
   elements["evolve-button"].disabled = locked || !state.run;
+  elements["shortcut-button"].disabled = locked || !state.run;
   elements["evaluate-button"].disabled = locked || !state.candidate || state.candidate.status !== "candidate";
   elements["activate-button"].disabled = locked || !state.evaluation?.accepted || state.candidate?.status === "active";
 }
@@ -272,17 +273,21 @@ async function runMission() {
   }
 }
 
-async function evolveHarness() {
+async function evolveHarness(kind = "evolve") {
   setBusy(true);
   try {
     const parent = activeHarness();
-    state.candidate = await api("/api/evolve", { method: "POST", body: JSON.stringify({ runId: state.run.runId }) });
+    state.evaluation = null;
+    resetEvaluationView();
+    state.candidate = await api(`/api/${kind}`, { method: "POST", body: JSON.stringify({ runId: state.run.runId }) });
     const { diagnosis, devMetrics, proposer, candidatesConsidered, modelError } = state.candidate;
     elements["learning-title"].textContent = diagnosis.summary;
     elements["diagnosis-copy"].textContent = `${diagnosis.code}. Evidence: ${diagnosis.evidence} Proposed change: ${state.candidate.changes.join("; ")}.`;
-    elements["proposer-copy"].textContent = `${candidatesConsidered} candidates scored on ${devMetrics.parent.scenarios} development scenarios; winner from ${proposer}. `
-      + `Development: correct ${devMetrics.parent.correctOutcomes} → ${devMetrics.candidate.correctOutcomes}, blocked roads ${devMetrics.parent.blockedEncounters} → ${devMetrics.candidate.blockedEncounters}.`
-      + (modelError ? ` (Model unavailable: ${modelError})` : "");
+    elements["proposer-copy"].textContent = kind === "shortcut"
+      ? `Proposed by a ${proposer}: ${state.candidate.rationale} Will the fixed gate catch it?`
+      : `${candidatesConsidered} candidates scored on ${devMetrics.parent.scenarios} development scenarios; winner from ${proposer}. `
+        + `Development: correct ${devMetrics.parent.correctOutcomes} → ${devMetrics.candidate.correctOutcomes}, blocked roads ${devMetrics.parent.blockedEncounters} → ${devMetrics.candidate.blockedEncounters}.`
+        + (modelError ? ` (Model unavailable: ${modelError})` : "");
     renderPolicy(elements["before-policy"], parent);
     renderPolicy(elements["after-policy"], state.candidate, parent);
     renderProcedure(state.candidate);
@@ -304,17 +309,30 @@ function showEvaluation(evaluation) {
   elements["safety-metric"].textContent = `${after.unsafeActions}`;
   elements["safety-detail"].textContent = "Fixed collision guard retained";
   const failed = Object.entries(evaluation.gates ?? {}).filter(([, ok]) => !ok).map(([gate]) => gate);
+  const worse = Object.entries(evaluation.familyDiff ?? {})
+    .filter(([, d]) => d.correctAfter < d.correctBefore || d.blockedAfter > d.blockedBefore)
+    .map(([family, d]) => d.correctAfter < d.correctBefore
+      ? `${family}: ${d.correctBefore} → ${d.correctAfter} of ${d.scenarios} correct`
+      : `${family}: blocked roads ${d.blockedBefore} → ${d.blockedAfter}`);
   elements["gate-result"].className = `gate-result ${accepted ? "pass" : "fail"}`;
   elements["gate-result"].innerHTML = accepted
     ? '<span class="gate-icon">✓</span><div><strong>All gates passed</strong><small>Candidate is eligible for fleet activation.</small></div>'
-    : `<span class="gate-icon">×</span><div><strong>Candidate rejected</strong><small>Failed: ${failed.join(", ") || "a fixed gate"}. The active harness is unchanged.</small></div>`;
+    : '<span class="gate-icon">×</span><div><strong>Candidate rejected</strong><small class="gate-why"></small></div>';
+  if (!accepted) {
+    const why = elements["gate-result"].querySelector(".gate-why");
+    why.textContent = `Failed: ${failed.join(", ") || "a fixed gate"}. The active harness is unchanged.`;
+    for (const line of worse) why.append(Object.assign(document.createElement("span"), { className: "family-diff", textContent: `▼ ${line}` }));
+  }
 }
 
 async function evaluateHarness() {
   setBusy(true);
   try {
     state.evaluation = await api("/api/evaluations", { method: "POST", body: JSON.stringify({ candidateVersion: state.candidate.version }) });
-    if (!state.evaluation.accepted) state.candidate.status = "rejected";
+    if (!state.evaluation.accepted) {
+      state.candidate.status = "rejected";
+      renderProcedure(activeHarness());
+    }
     showEvaluation(state.evaluation);
     await refreshOverview();
     toast(state.evaluation.accepted ? "Candidate passed every fixed evaluation gate." : "Candidate was rejected by the evaluator.");
@@ -439,7 +457,8 @@ elements["scenario-select"].addEventListener("change", (event) => {
   setButtons();
 });
 elements["run-button"].addEventListener("click", runMission);
-elements["evolve-button"].addEventListener("click", evolveHarness);
+elements["evolve-button"].addEventListener("click", () => evolveHarness("evolve"));
+elements["shortcut-button"].addEventListener("click", () => evolveHarness("shortcut"));
 elements["evaluate-button"].addEventListener("click", evaluateHarness);
 elements["activate-button"].addEventListener("click", activateHarness);
 elements["auto-button"].addEventListener("click", autoEvolve);

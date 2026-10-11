@@ -300,6 +300,8 @@ footer { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 25px 0 
 }
 
 .secondary-button.subtle { color: var(--muted); }
+#shortcut-button:not(:disabled) { border-style: dashed; }
+.family-diff { display: block; margin-top: 4px; }
 .proposer-copy { margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .policy-code .preflight { color: var(--navy); font-style: italic; }
 .procedure-item.preflight { border-style: dashed; color: var(--navy); }

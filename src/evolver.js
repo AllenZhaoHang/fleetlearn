@@ -33,6 +33,7 @@ const issueCatalog = {
 export function diagnoseRun(run, previousRunsInScenario = []) {
   const has = (type) => run.events.some((event) => event.type === type);
   const issues = [];
+  const road = (key) => key.split("::").map((id) => run.scenario.nodes?.[id]?.label ?? id).join("–");
   const add = (code, evidence) => issues.push({ code, ...issueCatalog[code], evidence, scenarioId: run.scenarioId, vehicle: run.vehicle });
 
   if (run.metrics.repeatedBlocks > 0 && !has("map_updated")) {
@@ -52,7 +53,7 @@ export function diagnoseRun(run, previousRunsInScenario = []) {
   const earlier = previousRunsInScenario.flatMap((prior) => prior.events.filter((e) => e.type === "road_blocked").map((e) => e.edge));
   const repeatedAcrossFleet = run.events.filter((e) => e.type === "road_blocked" && earlier.includes(e.edge));
   if (repeatedAcrossFleet.length && previousRunsInScenario.every((prior) => !prior.reportedEvents.length)) {
-    add("FLEET_KNOWLEDGE_NOT_SHARED", `Vehicle ${run.vehicle} hit ${repeatedAcrossFleet[0].edge.replace("::", "–")}, which vehicle ${run.vehicle - 1} had already seen.`);
+    add("FLEET_KNOWLEDGE_NOT_SHARED", `Vehicle ${run.vehicle} hit ${road(repeatedAcrossFleet[0].edge)}, which vehicle ${run.vehicle - 1} had already seen.`);
   }
   return issues;
 }
@@ -76,21 +77,25 @@ export function evaluateOn(harness, scenarioSet) {
   const results = scenarioSet.map((scenario) => {
     const runs = runScenario(scenario, harness);
     const issues = runs.flatMap((run, i) => diagnoseRun(run, runs.slice(0, i)));
-    return { scenario, runs, issues, correct: runs.every((run) => run.expectedSatisfied) };
+    const blocked = runs.reduce((total, run) => total + run.metrics.blockedEncounters, 0);
+    return { scenario, runs, issues, blocked, correct: runs.every((run) => run.expectedSatisfied) };
   });
   const runs = results.flatMap((result) => result.runs);
   const sum = (key) => runs.reduce((total, run) => total + Number(run.metrics[key]), 0);
   const byFamily = {};
   for (const result of results) {
-    const family = (byFamily[result.scenario.family] ??= { scenarios: 0, correct: 0 });
+    const family = (byFamily[result.scenario.family] ??= { scenarios: 0, correct: 0, blocked: 0 });
     family.scenarios += 1;
     family.correct += result.correct ? 1 : 0;
+    family.blocked += result.blocked;
   }
   const metrics = {
     scenarios: results.length,
     correctOutcomes: results.filter((result) => result.correct).length,
     successRate: results.length ? results.filter((result) => result.correct).length / results.length : 0,
     blockedEncounters: sum("blockedEncounters"),
+    // Only count encounters on scenarios that ended correctly, so giving up early can't look like progress.
+    blockedOnSuccess: results.filter((result) => result.correct).reduce((total, result) => total + result.blocked, 0),
     repeatedBlocks: sum("repeatedBlocks"),
     unsafeActions: sum("unsafeActions"),
     toolCalls: sum("toolCalls"),
@@ -100,10 +105,10 @@ export function evaluateOn(harness, scenarioSet) {
   return { metrics, results, issues: summarizeIssues(results.flatMap((result) => result.issues)) };
 }
 
-// Lexicographic: correct outcomes, then fewer blocked-road encounters, then fewer tool calls.
+// Lexicographic: correct outcomes, then fewer blocked roads on successful deliveries, then fewer tool calls.
 export function compareMetrics(a, b) {
   if (a.correctOutcomes !== b.correctOutcomes) return a.correctOutcomes - b.correctOutcomes;
-  if (a.blockedEncounters !== b.blockedEncounters) return b.blockedEncounters - a.blockedEncounters;
+  if (a.blockedOnSuccess !== b.blockedOnSuccess) return b.blockedOnSuccess - a.blockedOnSuccess;
   return b.toolCalls - a.toolCalls;
 }
 
@@ -221,6 +226,61 @@ export async function proposeHarness({ sourceHarness, sourceRun, version, modelP
 
 const stripFamilies = ({ byFamily, ...rest }) => rest;
 
+// Adversarial probe of the gate: the kind of edit a naive self-improver makes when it optimizes
+// for cost and only checks the run it just saw. It picks the cheapest single edit that still
+// handles that run, and goes to the same fixed holdout gate as any other candidate.
+export function proposeShortcut({ sourceHarness, sourceRun, version, rejected = [] }) {
+  const parent = normalizeHarness(sourceHarness);
+  const parentDev = evaluateOn(parent, developmentSet).metrics;
+  const skip = new Set([signature(parent), ...rejected.map((h) => signature(normalizeHarness(h)))]);
+  const stillHandlesSource = (candidate) => !sourceRun?.expectedSatisfied || simulateRunLike(sourceRun, candidate).expectedSatisfied;
+
+  const options = neighbors(parent)
+    .filter((shape) => validateHarness(shape) && !skip.has(signature(shape)))
+    .filter((shape) => shape.recoverySteps.length + shape.preflight.length < parent.recoverySteps.length + parent.preflight.length
+      || shape.maxRecoveryCycles < parent.maxRecoveryCycles)
+    .filter(stillHandlesSource)
+    .map((shape) => ({
+      shape,
+      sourceCost: sourceRun ? simulateRunLike(sourceRun, shape).metrics.toolCalls : 0,
+      size: shape.recoverySteps.length + shape.preflight.length,
+      dev: evaluateOn(shape, developmentSet).metrics
+    }))
+    .sort((a, b) => a.sourceCost - b.sourceCost || a.size - b.size);
+  if (!options.length) throw new Error("No cheaper shortcut exists for this harness.");
+  const { shape, dev } = options[0];
+  const changes = describeChange(parent, shape);
+  const saved = Math.max(0, parentDev.toolCalls - dev.toolCalls);
+  return {
+    version,
+    name: `Shortcut: ${changes.join("; ")}`,
+    status: "candidate",
+    parentVersion: parent.version,
+    preflight: shape.preflight,
+    recoverySteps: shape.recoverySteps,
+    maxRecoveryCycles: shape.maxRecoveryCycles,
+    changes,
+    rationale: `A shorter procedure${sourceRun?.expectedSatisfied ? " that still handles the run you just watched" : ""}. Only that one run was checked; the other disruption types were not.`,
+    diagnosis: {
+      code: "COST_PRESSURE",
+      summary: "A cheaper procedure that looks fine on the last run.",
+      evidence: `Removes work the last run did not need (${changes.join("; ")}).`,
+      proposedChange: changes.join("; ")
+    },
+    issues: [],
+    proposer: "cost-cutting shortcut (gate probe)",
+    candidatesConsidered: options.length,
+    modelCandidates: [],
+    devMetrics: { parent: stripFamilies(parentDev), candidate: stripFamilies(dev) },
+    sourceRunId: sourceRun?.runId ?? null,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function simulateRunLike(run, harness) {
+  return runScenario({ ...run.scenario, vehicles: 1 }, harness)[0];
+}
+
 // ---------- fixed holdout gate ----------
 
 export const gatePolicy = Object.freeze({ toolCostFactor: 1.5, toolCostSlack: 10 });
@@ -233,7 +293,8 @@ export function evaluateCandidate({ baseline, candidate }) {
   const gates = {
     noSafetyRegression: a.unsafeActions === 0,
     noFamilyRegression: Object.entries(b.byFamily).every(([family, stats]) => (a.byFamily[family]?.correct ?? 0) >= stats.correct),
-    measurableImprovement: a.correctOutcomes > b.correctOutcomes || a.blockedEncounters < b.blockedEncounters,
+    measurableImprovement: a.correctOutcomes > b.correctOutcomes
+      || (a.correctOutcomes === b.correctOutcomes && a.blockedOnSuccess < b.blockedOnSuccess),
     boundedToolCost: a.toolCalls <= b.toolCalls * gatePolicy.toolCostFactor + gatePolicy.toolCostSlack
   };
   const accepted = Object.values(gates).every(Boolean);
@@ -252,6 +313,13 @@ export function evaluateCandidate({ baseline, candidate }) {
     candidateMetrics: a,
     gates,
     accepted,
+    familyDiff: Object.fromEntries(Object.entries(b.byFamily).map(([family, stats]) => [family, {
+      scenarios: stats.scenarios,
+      correctBefore: stats.correct,
+      correctAfter: a.byFamily[family]?.correct ?? 0,
+      blockedBefore: stats.blocked,
+      blockedAfter: a.byFamily[family]?.blocked ?? 0
+    }])),
     baselineResults: compact(before),
     candidateResults: compact(after),
     createdAt: new Date().toISOString()

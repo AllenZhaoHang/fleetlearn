@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateCandidate, evaluateOn, proposeHarness } from "../src/evolver.js";
+import { evaluateCandidate, evaluateOn, proposeHarness, proposeShortcut } from "../src/evolver.js";
 import { baselineHarness, runScenario, simulateRun } from "../src/simulator.js";
 import { developmentSet, holdoutSet, materializeScenario } from "../src/scenarios.js";
 
@@ -73,4 +73,22 @@ test("four generations of local search reach every holdout family", async () => 
   const final = evaluateOn(harness, holdoutSet).metrics;
   assert.equal(final.correctOutcomes, holdoutSet.length);
   assert.equal(final.unsafeActions, 0);
+});
+
+test("giving up early does not count as fewer blocked roads", () => {
+  const giveUp = { ...baselineHarness, version: 2, recoverySteps: ["follow_route"] };
+  const evaluation = evaluateCandidate({ baseline: baselineHarness, candidate: { ...giveUp, recoverySteps: ["replan"] } });
+  assert.equal(evaluation.gates.measurableImprovement, false);
+  assert.equal(evaluation.accepted, false);
+});
+
+test("a cost-cutting shortcut that only checks the last run is rejected by the holdout gate", async () => {
+  let harness = baselineHarness;
+  for (let version = 2; version <= 3; version += 1) harness = await proposeHarness({ sourceHarness: harness, version });
+  const run = simulateRun({ scenarioId: "construction-main", harness });
+  const shortcut = proposeShortcut({ sourceHarness: harness, sourceRun: run, version: 4 });
+  assert.equal(simulateRun({ scenarioId: "construction-main", harness: shortcut }).status, "delivered");
+  const evaluation = evaluateCandidate({ baseline: harness, candidate: shortcut });
+  assert.equal(evaluation.accepted, false);
+  assert.ok(evaluation.familyDiff.unreachable.correctAfter < evaluation.familyDiff.unreachable.correctBefore);
 });

@@ -2,7 +2,7 @@
 // run vehicles -> record traces and road events in Atlas -> propose -> evaluate -> activate.
 import { materializeScenario } from "./scenarios.js";
 import { simulateRun } from "./simulator.js";
-import { evaluateCandidate, proposeHarness } from "./evolver.js";
+import { evaluateCandidate, proposeHarness, proposeShortcut } from "./evolver.js";
 import { modelProposer } from "./model-proposer.js";
 
 export async function runLive(store, scenarioId, harnessVersion) {
@@ -32,6 +32,19 @@ export async function evolveOnce(store, { sourceRunId } = {}) {
     sourceRun,
     version: await nextVersion(store),
     modelProposer: modelProposer(),
+    rejected: await store.listRejected()
+  });
+  await store.saveHarness(candidate);
+  return candidate;
+}
+
+// Stores a cost-cutting shortcut as a candidate, so the demo can show the fixed gate refusing it.
+export async function shortcutOnce(store, { sourceRunId } = {}) {
+  const sourceRun = sourceRunId ? await store.getRun(sourceRunId) : null;
+  const candidate = proposeShortcut({
+    sourceHarness: await store.getActiveHarness(),
+    sourceRun,
+    version: await nextVersion(store),
     rejected: await store.listRejected()
   });
   await store.saveHarness(candidate);

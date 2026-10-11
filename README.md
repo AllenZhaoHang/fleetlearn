@@ -29,7 +29,8 @@ robot run ──► trace + road events ──► diagnose ──► propose can
 
 - **Diagnosis** turns traces into named patterns: `STALE_MAP_RECOVERY_LOOP`, `NO_SAFE_ESCALATION`, `RECOVERY_BUDGET_EXHAUSTED`, `TOOL_BUDGET_EXCEEDED`, `KNOWN_CLOSURE_REDISCOVERED`, `FLEET_KNOWLEDGE_NOT_SHARED`.
 - **Proposal.** If a model is configured, Claude reads the patterns and the trace and suggests candidates. Local search also tries every single edit of the current harness. Every candidate, whoever proposed it, is schema-validated and scored on the development set. Versions that were rejected before are never proposed again.
-- **Gates (holdout, fixed).** No unsafe actions. No disruption type gets worse. A measurable improvement (more correct outcomes, or fewer blocked-road encounters). Tool cost stays bounded.
+- **Gates (holdout, fixed).** No unsafe actions. No disruption type gets worse. A measurable improvement: more correct outcomes, or the same outcomes with fewer blocked-road encounters *on successful deliveries*. Tool cost stays bounded.
+- **The gate is tested adversarially.** *Try a cheaper shortcut* proposes what a naive self-improver would: the cheapest edit that still handles the last run. The gate rejects it and names the disruption type that regressed. For example, removing `request_help` drops "unreachable" from 6/6 to 0/6. Building this probe caught a real reward hack in our first gate: a harness that gave up early hit fewer barriers and looked "better". Blocked roads now only count on deliveries that succeeded.
 
 ## Result (deterministic, reproducible with `npm run evolve -- --reset`)
 
@@ -56,7 +57,7 @@ robot run ──► trace + road events ──► diagnose ──► propose can
 npm install
 cp .env.example .env      # set MONGODB_URI to the hackathon Atlas Sandbox cluster
 npm start                 # http://localhost:3000
-npm test                  # 9 tests
+npm test                  # 11 tests
 npm run evolve -- --reset # headless evolution loop with printed lineage
 ```
 
@@ -68,8 +69,9 @@ Without `MONGODB_URI` the app runs in memory mode, which is fine for development
 2. **Generate improvement**. Show the diagnosis, how many candidates were scored, and the before/after procedure.
 3. **Evaluate candidate**. 6 → 30 of 36 unseen cities. All gates pass. **Activate fleet-wide**.
 4. **Run evolution loop**. The harness rewrites itself up to v5. Scroll to the lineage: each version shows why it exists.
-5. Run the mission twice. Robot 1 hits the closure once and reports it. Robot 2 loads it from Atlas and delivers on the first try.
-6. Switch to a generated city to show that the procedure transfers.
+5. **Try a cheaper shortcut** → **Evaluate candidate**. The fixed gate rejects it and shows what would have regressed. The active harness stays unchanged, and the rejected version stays in the lineage so it is never proposed again.
+6. Run the mission twice. Robot 1 hits the closure once and reports it. Robot 2 loads it from Atlas and delivers on the first try.
+7. Switch to a generated city to show that the procedure transfers.
 
 ## Built during the hackathon
 

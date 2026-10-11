@@ -6,7 +6,7 @@ import { developmentSet, families, holdoutSet, materializeScenario, scenarios } 
 import { guardrails, toolCatalog } from "./src/simulator.js";
 import { gatePolicy } from "./src/evolver.js";
 import { configuredModel } from "./src/model-proposer.js";
-import { autoEvolve, evaluateAndRecord, evolveOnce, runLive } from "./src/fleet.js";
+import { autoEvolve, evaluateAndRecord, evolveOnce, runLive, shortcutOnce } from "./src/fleet.js";
 import { FleetStore } from "./src/store.js";
 
 const app = express();
@@ -73,6 +73,10 @@ app.post("/api/evolve", asyncRoute(async (request, response) => {
   response.status(201).json(candidate);
 }));
 
+app.post("/api/shortcut", asyncRoute(async (request, response) => {
+  response.status(201).json(await shortcutOnce(store, { sourceRunId: request.body.runId }));
+}));
+
 app.post("/api/evaluations", asyncRoute(async (request, response) => {
   response.status(201).json(await evaluateAndRecord(store, request.body.candidateVersion));
 }));
@@ -115,7 +119,7 @@ app.get("/health", (_request, response) => {
 });
 
 app.use((error, _request, response, _next) => {
-  const status = error.status ?? (/No (failure patterns|candidate improved)/.test(error.message) ? 409 : 500);
+  const status = error.status ?? (/No (failure patterns|candidate improved|cheaper shortcut)/.test(error.message) ? 409 : 500);
   if (status === 500) console.error(error);
   response.status(status).json({ error: error.message || "Unexpected server error" });
 });
