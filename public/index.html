@@ -15,6 +15,7 @@
       </a>
       <div class="status-line">
         <span id="storage-pill" class="status-pill waiting"><i></i> Connecting</span>
+        <span id="memory-pill" class="version-pill">Fleet memory: 0 closures</span>
         <span id="harness-pill" class="version-pill">Harness v—</span>
       </div>
     </header>
@@ -24,8 +25,9 @@
         <p class="eyebrow">Recursive harnessing for last-mile delivery</p>
         <h1>Roads change.<br /><span>The fleet learns.</span></h1>
         <p class="intro-copy">
-          FleetLearn turns one failed community-meal delivery into a tested recovery procedure
-          that every later vehicle can use.
+          FleetLearn turns failed community-meal deliveries into tested recovery procedures.
+          Every failure trace, harness version, evaluation and reported road closure lives in MongoDB Atlas,
+          so each new vehicle starts from what the whole fleet has learned.
         </p>
       </section>
 
@@ -55,6 +57,8 @@
             <button id="evolve-button" class="secondary-button" disabled>Generate improvement</button>
             <button id="evaluate-button" class="secondary-button" disabled>Evaluate candidate</button>
             <button id="activate-button" class="secondary-button" disabled>Activate fleet-wide</button>
+            <button id="auto-button" class="secondary-button">Run evolution loop</button>
+            <button id="reset-button" class="secondary-button subtle">Reset to v1</button>
           </div>
         </article>
 
@@ -87,6 +91,7 @@
             The harness can revise tool order and escalation logic, while collision rules,
             evaluation scenarios, and safety gates remain fixed.
           </p>
+          <p id="proposer-copy" class="proposer-copy"></p>
         </div>
 
         <div class="policy-diff">
@@ -102,13 +107,24 @@
         </div>
       </section>
 
+      <section class="lineage-section">
+        <div class="evidence-heading">
+          <div>
+            <p class="section-label">Harness lineage (MongoDB Atlas: harness_versions)</p>
+            <h2>Every version, and why it exists.</h2>
+          </div>
+          <p>Each version records the failure pattern that triggered it, who proposed it, and whether it passed the gate.</p>
+        </div>
+        <ol id="lineage-list" class="lineage-list"></ol>
+      </section>
+
       <section class="evidence-section">
         <div class="evidence-heading">
           <div>
             <p class="section-label">Fixed holdout evaluation</p>
             <h2>Earn the right to deploy.</h2>
           </div>
-          <p>New policies face unseen road layouts. A candidate activates only when every gate passes.</p>
+          <p id="holdout-copy">New policies face unseen generated cities. A candidate activates only when every gate passes.</p>
         </div>
 
         <div class="evidence-grid">
@@ -118,7 +134,7 @@
             <small id="success-detail">Run an evaluation</small>
           </div>
           <div class="metric-pair">
-            <span>Repeated blockages</span>
+            <span>Blocked-road encounters</span>
             <strong id="repeat-metric">—</strong>
             <small id="repeat-detail">Run an evaluation</small>
           </div>
@@ -137,7 +153,7 @@
 
     <footer>
       <span>Built for the Harness Engineering &amp; Model Wrangling Hackathon</span>
-      <span>MongoDB Atlas stores runs, policies, and evaluations</span>
+      <span>MongoDB Atlas stores runs, harness versions, evaluations, and fleet road events</span>
     </footer>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

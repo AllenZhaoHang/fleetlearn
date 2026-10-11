@@ -2,10 +2,11 @@ import "dotenv/config";
 import express from "express";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { materializeScenario, scenarios } from "./src/scenarios.js";
-import { simulateRun } from "./src/simulator.js";
-import { diagnoseRun, evaluateCandidate, proposeHarness } from "./src/evolver.js";
-import { enrichDiagnosis } from "./src/model-analyst.js";
+import { developmentSet, families, holdoutSet, materializeScenario, scenarios } from "./src/scenarios.js";
+import { guardrails, toolCatalog } from "./src/simulator.js";
+import { gatePolicy } from "./src/evolver.js";
+import { configuredModel } from "./src/model-proposer.js";
+import { autoEvolve, evaluateAndRecord, evolveOnce, runLive } from "./src/fleet.js";
 import { FleetStore } from "./src/store.js";
 
 const app = express();
@@ -28,23 +29,29 @@ const asyncRoute = (handler) => async (request, response, next) => {
 };
 
 app.get("/api/overview", asyncRoute(async (_request, response) => {
-  const [activeHarness, harnesses, runs, evaluations] = await Promise.all([
+  const [activeHarness, harnesses, runs, evaluations, roadEvents] = await Promise.all([
     store.getActiveHarness(),
     store.listHarnesses(),
     store.listRuns(),
-    store.listEvaluations()
+    store.listEvaluations(),
+    store.listRoadEvents()
   ]);
   response.json({
     storageMode,
     atlasRequiredForSubmission: true,
-    modelAnalystConfigured: Boolean(
-      process.env.MODEL_API_URL && process.env.MODEL_API_KEY && process.env.MODEL_NAME
-    ),
+    model: configuredModel(),
     scenarios,
+    families,
+    toolCatalog,
+    guardrails,
+    gatePolicy,
+    developmentScenarios: developmentSet.length,
+    holdoutScenarios: holdoutSet.length,
     activeHarness,
     harnesses,
     runs,
-    evaluations
+    evaluations,
+    roadEvents
   });
 }));
 
@@ -57,66 +64,45 @@ app.get("/api/scenarios/:id", (request, response, next) => {
 });
 
 app.post("/api/runs", asyncRoute(async (request, response) => {
-  const scenarioId = request.body.scenarioId ?? "construction-main";
-  const harness = request.body.harnessVersion
-    ? await store.getHarness(request.body.harnessVersion)
-    : await store.getActiveHarness();
-  if (!harness) return response.status(404).json({ error: "Harness not found" });
-  const run = simulateRun({ scenarioId, harness });
-  await store.saveRun(run);
+  const run = await runLive(store, request.body.scenarioId ?? "construction-main", request.body.harnessVersion);
   response.status(201).json(run);
 }));
 
 app.post("/api/evolve", asyncRoute(async (request, response) => {
-  const sourceRun = await store.getRun(request.body.runId);
-  if (!sourceRun) return response.status(404).json({ error: "Source run not found" });
-  if (sourceRun.status !== "failed") {
-    return response.status(409).json({ error: "Only failed runs can trigger harness evolution" });
-  }
-  const sourceHarness = await store.getHarness(sourceRun.harnessVersion);
-  const harnesses = await store.listHarnesses();
-  const nextVersion = Math.max(...harnesses.map((item) => item.version), 0) + 1;
-  const localDiagnosis = diagnoseRun(sourceRun);
-  let enriched;
-  try {
-    enriched = await enrichDiagnosis({ run: sourceRun, diagnosis: localDiagnosis });
-  } catch (error) {
-    enriched = {
-      diagnosis: localDiagnosis,
-      analyst: "bounded-local-critic",
-      analystFallbackReason: error.message
-    };
-  }
-  const candidate = proposeHarness({ sourceHarness, sourceRun, version: nextVersion });
-  candidate.diagnosis = enriched.diagnosis;
-  candidate.rationale = enriched.diagnosis.proposedChange;
-  candidate.analyst = enriched.analyst;
-  if (enriched.analystFallbackReason) candidate.analystFallbackReason = enriched.analystFallbackReason;
-  await store.saveHarness(candidate);
+  const candidate = await evolveOnce(store, { sourceRunId: request.body.runId });
   response.status(201).json(candidate);
 }));
 
 app.post("/api/evaluations", asyncRoute(async (request, response) => {
-  const candidate = await store.getHarness(request.body.candidateVersion);
-  if (!candidate) return response.status(404).json({ error: "Candidate harness not found" });
-  const baseline = await store.getHarness(candidate.parentVersion);
-  if (!baseline) return response.status(404).json({ error: "Parent harness not found" });
-  const evaluation = evaluateCandidate({ baseline, candidate });
-  await store.saveEvaluation(evaluation);
-  response.status(201).json(evaluation);
+  response.status(201).json(await evaluateAndRecord(store, request.body.candidateVersion));
 }));
 
 app.post("/api/harnesses/:version/activate", asyncRoute(async (request, response) => {
   const version = Number(request.params.version);
-  const evaluations = await store.listEvaluations(20);
+  const evaluations = await store.listEvaluations(50);
   const approval = evaluations.find(
     (evaluation) => evaluation.candidateVersion === version && evaluation.accepted
   );
   if (!approval) {
     return response.status(409).json({ error: "Candidate must pass the fixed evaluation gates first" });
   }
-  const harness = await store.activateHarness(version);
-  response.json(harness);
+  response.json(await store.activateHarness(version));
+}));
+
+app.post("/api/auto-evolve", asyncRoute(async (request, response) => {
+  const steps = await autoEvolve(store, { maxGenerations: Math.min(Number(request.body.maxGenerations ?? 6), 10) });
+  response.json({
+    steps: steps.map((step) => step.stopped ? step : {
+      version: step.candidate.version,
+      name: step.candidate.name,
+      proposer: step.candidate.proposer,
+      issue: step.candidate.diagnosis.code,
+      accepted: step.evaluation.accepted,
+      before: step.evaluation.baselineMetrics,
+      after: step.evaluation.candidateMetrics
+    }),
+    activeHarness: await store.getActiveHarness()
+  });
 }));
 
 app.post("/api/reset", asyncRoute(async (_request, response) => {
@@ -129,12 +115,13 @@ app.get("/health", (_request, response) => {
 });
 
 app.use((error, _request, response, _next) => {
-  console.error(error);
-  response.status(500).json({ error: error.message || "Unexpected server error" });
+  const status = error.status ?? (/No (failure patterns|candidate improved)/.test(error.message) ? 409 : 500);
+  if (status === 500) console.error(error);
+  response.status(status).json({ error: error.message || "Unexpected server error" });
 });
 
 const server = app.listen(port, () => {
-  console.log(`FleetLearn running at http://localhost:${port} (${storageMode} storage)`);
+  console.log(`FleetLearn running at http://localhost:${port} (${storageMode} storage, model: ${configuredModel() ?? "none - local search only"})`);
 });
 
 const shutdown = async () => {

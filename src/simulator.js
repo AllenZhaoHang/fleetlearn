@@ -1,115 +1,100 @@
-import { edgeKey, materializeScenario } from "./scenarios.js";
+import { edgeKey, materializeScenario, shortestPath } from "./scenarios.js";
 
 export const baselineHarness = {
   version: 1,
   name: "Static-map recovery",
   status: "active",
   parentVersion: null,
+  preflight: [],
   recoverySteps: ["replan", "follow_route"],
   maxRecoveryCycles: 3,
   rationale: "Replan on the original map, then retry the route.",
   createdAt: new Date().toISOString()
 };
 
-const allowedSteps = new Set([
-  "inspect_local",
-  "update_local_map",
-  "replan",
-  "follow_route",
-  "request_help"
-]);
+// The tool surface the harness may compose. The optimizer can reorder, add, or drop
+// these, but cannot add new tools or change what they do.
+export const toolCatalog = {
+  query_fleet_memory: "Load road closures other vehicles reported for this area into the task map.",
+  inspect_local: "Look at the road directly ahead and record what is observed.",
+  update_local_map: "Mark the closure this vehicle just observed as blocked in its task map.",
+  report_road_event: "Publish the closure this vehicle observed to fleet memory (MongoDB Atlas) for later vehicles.",
+  replan: "Compute a new shortest route from the current position using the task map.",
+  follow_route: "Drive the current route until delivery or the next blocked road.",
+  request_help: "If no route remains in the task map, stop and request human assistance."
+};
 
-export function validateHarness(harness) {
-  if (!harness || !Array.isArray(harness.recoverySteps)) return false;
-  if (harness.recoverySteps.length < 2 || harness.recoverySteps.length > 7) return false;
-  if (!harness.recoverySteps.every((step) => allowedSteps.has(step))) return false;
+const preflightTools = new Set(["query_fleet_memory"]);
+
+// Fixed guardrails. These are not part of the harness and cannot be evolved.
+export const guardrails = Object.freeze({
+  maxToolCallsPerRun: 24,
+  maxRecoveryCycles: 5,
+  maxRecoverySteps: 8
+});
+
+export function normalizeHarness(harness) {
+  return { preflight: [], ...harness };
+}
+
+export function validateHarness(input) {
+  if (!input || !Array.isArray(input.recoverySteps)) return false;
+  const harness = normalizeHarness(input);
+  if (!Array.isArray(harness.preflight) || harness.preflight.length > 2) return false;
+  if (!harness.preflight.every((step) => preflightTools.has(step))) return false;
+  if (harness.recoverySteps.length < 1 || harness.recoverySteps.length > guardrails.maxRecoverySteps) return false;
+  if (!harness.recoverySteps.every((step) => step in toolCatalog)) return false;
   return Number.isInteger(harness.maxRecoveryCycles)
     && harness.maxRecoveryCycles >= 1
-    && harness.maxRecoveryCycles <= 5;
+    && harness.maxRecoveryCycles <= guardrails.maxRecoveryCycles;
 }
 
-function shortestPath(scenario, knownBlocked, from, goal) {
-  const distance = new Map([[from, 0]]);
-  const previous = new Map();
-  const remaining = new Set(Object.keys(scenario.nodes));
-
-  while (remaining.size) {
-    let current = null;
-    let best = Infinity;
-    for (const node of remaining) {
-      const value = distance.get(node) ?? Infinity;
-      if (value < best) {
-        best = value;
-        current = node;
-      }
-    }
-    if (current === null || best === Infinity) break;
-    remaining.delete(current);
-    if (current === goal) break;
-
-    for (const [a, b, weight] of scenario.edges) {
-      if (knownBlocked.has(edgeKey(a, b))) continue;
-      const neighbor = a === current ? b : b === current ? a : null;
-      if (!neighbor || !remaining.has(neighbor)) continue;
-      const candidate = best + weight;
-      if (candidate < (distance.get(neighbor) ?? Infinity)) {
-        distance.set(neighbor, candidate);
-        previous.set(neighbor, current);
-      }
-    }
-  }
-
-  if (!distance.has(goal)) return null;
-  const path = [];
-  let cursor = goal;
-  while (cursor) {
-    path.unshift(cursor);
-    if (cursor === from) break;
-    cursor = previous.get(cursor);
-  }
-  return path[0] === from ? path : null;
-}
-
-export function simulateRun({ scenarioId, harness, runId = crypto.randomUUID() }) {
-  if (!validateHarness(harness)) throw new Error("Harness failed schema validation");
-  const scenario = materializeScenario(scenarioId);
+export function simulateRun({ scenarioId, scenario: given, harness: input, fleetMemory = [], vehicle = 1, runId = crypto.randomUUID() }) {
+  if (!validateHarness(input)) throw new Error("Harness failed schema validation");
+  const harness = normalizeHarness(input);
+  const scenario = given ? structuredClone(given) : materializeScenario(scenarioId);
   const worldBlocked = new Set(scenario.blockedEdges.map(([a, b]) => edgeKey(a, b)));
   const knownBlocked = new Set();
   const events = [];
   const encountered = new Map();
+  const reportedEvents = [];
   let current = scenario.start;
-  let route = shortestPath(scenario, knownBlocked, current, scenario.goal);
+  let route = null;
   let observedBlock = null;
   let delivered = false;
   let requestedHelp = false;
-  let unsafeActions = 0;
+  let budgetExceeded = false;
+  let distance = 0;
+  let toolCalls = 0;
+  const unsafeActions = 0; // the simulator physically refuses to enter a blocked road
 
   const record = (type, detail = {}) => {
     events.push({ index: events.length, type, current, ...detail });
   };
-
-  record("run_started", { route, harnessVersion: harness.version });
+  const plan = () => shortestPath(scenario.nodes, scenario.edges, knownBlocked, current, scenario.goal);
+  const weightOf = (a, b) => scenario.edges.find(([x, y]) => edgeKey(x, y) === edgeKey(a, b))?.[2] ?? 1;
 
   const followRoute = () => {
     if (!route) {
       record("route_unavailable");
       return "unavailable";
     }
-    for (let index = 1; index < route.length; index += 1) {
+    const start = route.indexOf(current);
+    if (start === -1) {
+      record("route_unavailable", { reason: "Route does not start at the vehicle position" });
+      return "unavailable";
+    }
+    for (let index = start + 1; index < route.length; index += 1) {
       const next = route[index];
       const key = edgeKey(current, next);
       record("edge_attempted", { from: current, to: next, edge: key });
       if (worldBlocked.has(key)) {
         observedBlock = key;
         encountered.set(key, (encountered.get(key) ?? 0) + 1);
-        record("road_blocked", {
-          from: current,
-          to: next,
-          edge: key,
-          encounter: encountered.get(key)
-        });
+        record("road_blocked", { from: current, to: next, edge: key, encounter: encountered.get(key) });
         return "blocked";
       }
+      distance += weightOf(current, next);
       current = next;
       record("vehicle_moved", { to: current });
       if (current === scenario.goal) {
@@ -118,73 +103,111 @@ export function simulateRun({ scenarioId, harness, runId = crypto.randomUUID() }
         return "delivered";
       }
     }
-    return delivered ? "delivered" : "stopped";
+    return "stopped";
   };
 
-  let outcome = followRoute();
+  const callTool = (step, cycle) => {
+    toolCalls += 1;
+    if (toolCalls > guardrails.maxToolCallsPerRun) {
+      budgetExceeded = true;
+      return "halt";
+    }
+    record("tool_called", { tool: step, cycle });
+    if (step === "query_fleet_memory") {
+      const fresh = fleetMemory.filter((edge) => !knownBlocked.has(edge));
+      fresh.forEach((edge) => knownBlocked.add(edge));
+      record("fleet_memory_loaded", { edges: fresh, total: fleetMemory.length });
+    } else if (step === "inspect_local") {
+      record("local_observation", { observedBlock });
+    } else if (step === "update_local_map") {
+      if (observedBlock) {
+        knownBlocked.add(observedBlock);
+        record("map_updated", { blockedEdge: observedBlock });
+      } else {
+        record("map_update_skipped", { reason: "No locally observed blockage" });
+      }
+    } else if (step === "report_road_event") {
+      if (observedBlock && !reportedEvents.includes(observedBlock)) {
+        reportedEvents.push(observedBlock);
+        record("road_event_reported", { edge: observedBlock });
+      }
+    } else if (step === "replan") {
+      route = plan();
+      record("route_planned", { route, knownBlocked: [...knownBlocked] });
+    } else if (step === "follow_route") {
+      if (followRoute() === "delivered") return "done";
+    } else if (step === "request_help" && !route) {
+      requestedHelp = true;
+      record("assistance_requested", { reason: "No verified route remains", knownBlocked: [...knownBlocked] });
+      return "done";
+    }
+    return "continue";
+  };
+
+  record("run_started", { harnessVersion: harness.version, vehicle, fleetMemorySize: fleetMemory.length });
+  for (const step of harness.preflight) callTool(step, 0);
+  route = plan();
+  record("route_planned", { route, knownBlocked: [...knownBlocked] });
+  followRoute();
+
   let cycles = 0;
-  while (!delivered && !requestedHelp && cycles < harness.maxRecoveryCycles) {
+  while (!delivered && !requestedHelp && !budgetExceeded && cycles < harness.maxRecoveryCycles) {
     cycles += 1;
     record("recovery_cycle_started", { cycle: cycles });
-
     for (const step of harness.recoverySteps) {
-      record("tool_called", { tool: step, cycle: cycles });
-      if (step === "inspect_local") {
-        record("local_observation", { observedBlock });
-      } else if (step === "update_local_map") {
-        if (observedBlock) {
-          knownBlocked.add(observedBlock);
-          record("map_updated", { blockedEdge: observedBlock });
-        } else {
-          record("map_update_skipped", { reason: "No locally observed blockage" });
-        }
-      } else if (step === "replan") {
-        route = shortestPath(scenario, knownBlocked, current, scenario.goal);
-        record("route_planned", { route, knownBlocked: [...knownBlocked] });
-      } else if (step === "follow_route") {
-        outcome = followRoute();
-        if (outcome === "delivered") break;
-      } else if (step === "request_help" && !route) {
-        requestedHelp = true;
-        record("assistance_requested", {
-          reason: "No verified route remains",
-          knownBlocked: [...knownBlocked]
-        });
-        break;
-      }
+      const result = callTool(step, cycles);
+      if (result !== "continue") break;
     }
   }
 
-  if (!delivered && !requestedHelp) {
-    record("run_stopped", { reason: "Recovery budget exhausted" });
-  }
+  if (budgetExceeded) record("run_stopped", { reason: "Fixed tool-call budget exceeded" });
+  else if (!delivered && !requestedHelp) record("run_stopped", { reason: "Recovery budget exhausted" });
 
-  const repeatedBlocks = [...encountered.values()].reduce(
-    (total, count) => total + Math.max(0, count - 1),
-    0
-  );
+  const blockedEncounters = [...encountered.values()].reduce((total, count) => total + count, 0);
+  const repeatedBlocks = [...encountered.values()].reduce((total, count) => total + Math.max(0, count - 1), 0);
+  const knownInMemory = [...encountered.keys()].filter((edge) => fleetMemory.includes(edge)).length;
   const expectedSatisfied = scenario.expected === "deliver" ? delivered : requestedHelp;
   const status = delivered ? "delivered" : requestedHelp ? "help_requested" : "failed";
 
   return {
     runId,
-    scenarioId,
+    scenarioId: scenario.id,
     scenarioName: scenario.name,
+    family: scenario.family,
     scenario,
+    vehicle,
     harnessVersion: harness.version,
     harnessName: harness.name,
     status,
     expectedSatisfied,
     events,
+    reportedEvents,
     metrics: {
       delivered,
       requestedHelp,
+      blockedEncounters,
       repeatedBlocks,
+      knownClosuresRediscovered: knownInMemory,
       unsafeActions,
-      toolCalls: events.filter((event) => event.type === "tool_called").length,
+      budgetExceeded,
+      toolCalls: Math.min(toolCalls, guardrails.maxToolCallsPerRun),
+      distance: Number(distance.toFixed(2)),
       movementSteps: events.filter((event) => event.type === "vehicle_moved").length,
       totalEvents: events.length
     },
     createdAt: new Date().toISOString()
   };
+}
+
+// Runs every vehicle in a scenario. Vehicles share fleet memory in order, so the
+// second vehicle in a convoy only benefits if the first one reported what it saw.
+export function runScenario(scenario, harness) {
+  let memory = [...(scenario.priorReports ?? [])];
+  const runs = [];
+  for (let vehicle = 1; vehicle <= (scenario.vehicles ?? 1); vehicle += 1) {
+    const run = simulateRun({ scenario, harness, fleetMemory: memory, vehicle });
+    memory = [...new Set([...memory, ...run.reportedEvents])];
+    runs.push(run);
+  }
+  return runs;
 }

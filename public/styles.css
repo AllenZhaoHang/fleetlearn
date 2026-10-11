@@ -298,3 +298,21 @@ footer { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 25px 0 
   .evidence-grid { grid-template-columns: 1fr; }
   footer { flex-direction: column; }
 }
+
+.secondary-button.subtle { color: var(--muted); }
+.proposer-copy { margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.policy-code .preflight { color: var(--navy); font-style: italic; }
+.procedure-item.preflight { border-style: dashed; color: var(--navy); }
+.road-center.memory { stroke: var(--navy); stroke-width: 4; stroke-dasharray: 2 6; }
+.lineage-section { margin-top: 18px; padding: 28px; border: 1px solid var(--line); border-radius: 24px; background: var(--card); box-shadow: var(--shadow); }
+.lineage-list { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 10px; }
+.lineage-item { display: grid; grid-template-columns: 64px 1fr auto; gap: 16px; align-items: start; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+.lineage-item.active { border-color: var(--green); background: var(--green-pale); }
+.lineage-item.rejected { opacity: .62; }
+.lineage-version { font-weight: 800; font-size: 18px; color: var(--green-dark); }
+.lineage-body strong { display: block; font-size: 14px; }
+.lineage-body small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.lineage-body code { font-size: 11.5px; color: var(--navy); }
+.lineage-status { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.lineage-item.active .lineage-status { color: var(--green); }
+@media (max-width: 700px) { .lineage-item { grid-template-columns: 1fr; gap: 6px; } .lineage-section { padding: 18px; } }

@@ -11,7 +11,8 @@ export class FleetStore {
     this.memory = {
       harnesses: new Map(),
       runs: new Map(),
-      evaluations: new Map()
+      evaluations: new Map(),
+      roadEvents: []
     };
   }
 
@@ -24,7 +25,8 @@ export class FleetStore {
         await Promise.all([
           this.db.collection("runs").createIndex({ runId: 1 }, { unique: true }),
           this.db.collection("harness_versions").createIndex({ version: 1 }, { unique: true }),
-          this.db.collection("evaluations").createIndex({ evaluationId: 1 }, { unique: true })
+          this.db.collection("evaluations").createIndex({ evaluationId: 1 }, { unique: true }),
+          this.db.collection("road_events").createIndex({ worldId: 1, edge: 1 }, { unique: true })
         ]);
         this.mode = "atlas";
       } catch (error) {
@@ -113,6 +115,47 @@ export class FleetStore {
     return this.getHarness(version);
   }
 
+  async setHarnessStatus(version, status) {
+    if (this.db) {
+      await this.db.collection("harness_versions").updateOne({ version: Number(version) }, { $set: { status } });
+    } else {
+      const harness = this.memory.harnesses.get(Number(version));
+      if (harness) harness.status = status;
+    }
+  }
+
+  async listRejected() {
+    return (await this.listHarnesses()).filter((harness) => harness.status === "rejected");
+  }
+
+  // Fleet memory: closures reported by vehicles, keyed by the road world they were seen in.
+  async saveRoadEvents(worldId, edges, run) {
+    const docs = edges.map((edge) => ({
+      worldId,
+      edge,
+      reportedBy: run.runId,
+      harnessVersion: run.harnessVersion,
+      reportedAt: new Date().toISOString()
+    }));
+    if (!docs.length) return;
+    if (this.db) {
+      await this.db.collection("road_events").bulkWrite(docs.map((doc) => ({
+        updateOne: { filter: { worldId, edge: doc.edge }, update: { $setOnInsert: doc }, upsert: true }
+      })));
+    } else {
+      for (const doc of docs) {
+        if (!this.memory.roadEvents.some((item) => item.worldId === worldId && item.edge === doc.edge)) this.memory.roadEvents.push(doc);
+      }
+    }
+  }
+
+  async listRoadEvents(worldId) {
+    if (this.db) {
+      return this.db.collection("road_events").find(worldId ? { worldId } : {}, { projection: { _id: 0 } }).toArray();
+    }
+    return this.memory.roadEvents.filter((item) => !worldId || item.worldId === worldId);
+  }
+
   async saveRun(run) {
     const clean = structuredClone(run);
     if (this.db) {
@@ -168,7 +211,7 @@ export class FleetStore {
   async listEvaluations(limit = 4) {
     if (this.db) {
       return this.db.collection("evaluations")
-        .find({}, { projection: { _id: 0, baselineRuns: 0, candidateRuns: 0 } })
+        .find({}, { projection: { _id: 0, baselineResults: 0, candidateResults: 0 } })
         .sort({ createdAt: -1 })
         .limit(limit)
         .toArray();
@@ -176,7 +219,7 @@ export class FleetStore {
     return [...this.memory.evaluations.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
-      .map(({ baselineRuns, candidateRuns, ...evaluation }) => evaluation);
+      .map(({ baselineResults, candidateResults, ...evaluation }) => evaluation);
   }
 
   async resetDemo() {
@@ -184,12 +227,14 @@ export class FleetStore {
       await Promise.all([
         this.db.collection("runs").deleteMany({}),
         this.db.collection("evaluations").deleteMany({}),
-        this.db.collection("harness_versions").deleteMany({})
+        this.db.collection("harness_versions").deleteMany({}),
+        this.db.collection("road_events").deleteMany({})
       ]);
     } else {
       this.memory.runs.clear();
       this.memory.evaluations.clear();
       this.memory.harnesses.clear();
+      this.memory.roadEvents = [];
     }
     await this.saveHarness(structuredClone(baselineHarness));
   }
