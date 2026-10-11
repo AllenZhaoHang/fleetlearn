@@ -197,8 +197,10 @@ export function describeChange(parent, childInput) {
 }
 
 const humanName = (changes) => {
-  const text = changes.join("; ");
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "No change";
+  if (!changes.length) return "No change";
+  const shown = changes.slice(0, 2).join("; ");
+  const more = changes.length > 2 ? ` (+${changes.length - 2} more)` : "";
+  return shown.charAt(0).toUpperCase() + shown.slice(1) + more;
 };
 
 // Proposes the next harness. Every candidate (from the model or from search) is scored on the

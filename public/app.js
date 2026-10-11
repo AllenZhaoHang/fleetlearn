@@ -17,7 +17,9 @@ const elements = Object.fromEntries([
   "gate-result", "lineage-list", "holdout-copy", "toast"
 ].map((id) => [id, document.getElementById(id)]));
 
-const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+// ?speed=2 plays vehicle animations twice as fast (used for the recorded demo).
+const speed = Math.max(0.25, Number(new URLSearchParams(location.search).get("speed")) || 1);
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds / speed));
 
 async function api(path, options = {}) {
   const response = await fetch(path, {

@@ -84,4 +84,4 @@ Without `MONGODB_URI` the app runs in memory mode, which is fine for development
 
 All code in this repository was written on Oct 11, 2026 during the event. Third-party pieces: Express, the MongoDB Node driver, dotenv, and the Anthropic SDK. LLM inference during the demo comes from Groq's OpenAI-compatible API.
 
-Team: _add names and roles here_.
+Team: Hang Zhao (solo).
